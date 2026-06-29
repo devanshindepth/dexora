@@ -1,0 +1,79 @@
+{
+  "global_knowledge": [
+    {
+      "id": "gk-001",
+      "category": "product",
+      "content": "Dexora is an AI-powered sales intelligence platform that provides real-time coaching, objection handling, and meeting intelligence to sales teams. It integrates with CRM systems and learns from every customer interaction."
+    },
+    {
+      "id": "gk-002",
+      "category": "pricing",
+      "content": "Dexora pricing: Starter $49/seat/month (up to 5 seats, basic AI suggestions), Growth $99/seat/month (unlimited seats, full memory, CRM integration), Enterprise custom pricing (SSO, dedicated support, on-prem option). Annual billing gives 20% discount."
+    },
+    {
+      "id": "gk-003",
+      "category": "product",
+      "content": "Dexora key differentiators: (1) Three-tier memory system that gets smarter with every call, (2) Real-time suggestion cards in under 800ms, (3) No AI speaks to customers — pure augmentation of human reps, (4) Works with any telephony system via browser microphone, (5) Full data privacy — customer data stays on your infrastructure."
+    },
+    {
+      "id": "gk-004",
+      "category": "objection-rebuttal",
+      "content": "Objection: 'It's too expensive.' Rebuttal: Focus on ROI — average Dexora customer sees 23% increase in conversion rate within 90 days. At $99/seat, that's less than one lost deal per month. Ask: 'What's your current close rate and average deal size? Let me show you the math.'"
+    },
+    {
+      "id": "gk-005",
+      "category": "objection-rebuttal",
+      "content": "Objection: 'We already have a CRM / sales tool.' Rebuttal: 'Dexora doesn't replace your CRM — it sits on top of it. It's the difference between having a record of calls and actually getting smarter from them. Your CRM stores data. Dexora turns it into real-time intelligence.' "
+    },
+    {
+      "id": "gk-006",
+      "category": "objection-rebuttal",
+      "content": "Objection: 'We don't have budget right now.' Rebuttal: 'I understand timing matters. Two questions — when does your budget cycle reset? And if I could show you that Dexora pays for itself in the first 60 days, would that change the conversation?' Position as self-funding investment, not a cost."
+    },
+    {
+      "id": "gk-007",
+      "category": "objection-rebuttal",
+      "content": "Objection: 'I need to think about it / talk to my team.' Rebuttal: 'Of course. To make that conversation easier — what are the two or three questions your team will ask that I should help you answer right now?' This surfaces real blockers before the prospect goes dark."
+    },
+    {
+      "id": "gk-008",
+      "category": "objection-rebuttal",
+      "content": "Objection: 'We tried AI tools before and they didn't work.' Rebuttal: 'That's really common — most AI sales tools give generic suggestions that aren't relevant. Dexora is different because it learns specifically from YOUR calls. After 10 sessions, it knows your customers' objections better than a new hire does after 6 months.'"
+    },
+    {
+      "id": "gk-009",
+      "category": "objection-rebuttal",
+      "content": "Objection: 'How do we know our customer data is safe?' Rebuttal: 'Great question. Dexora runs on your own infrastructure for Enterprise plans — we never store your customer conversations on our servers. For cloud plans, all data is encrypted at rest and in transit, SOC2 compliant, and GDPR-ready. We can walk through our security whitepaper.'"
+    },
+    {
+      "id": "gk-010",
+      "category": "smart-question",
+      "content": "Discovery question: 'Walk me through what happens today when a new sales rep joins your team — how long before they're hitting quota?' This surfaces onboarding pain and time-to-ramp, both areas Dexora directly improves."
+    },
+    {
+      "id": "gk-011",
+      "category": "smart-question",
+      "content": "Discovery question: 'What happens after a call today — does your team debrief, log notes, or does the context just get lost?' This surfaces the knowledge-retention gap that Dexora's memory system solves."
+    },
+    {
+      "id": "gk-012",
+      "category": "smart-question",
+      "content": "Discovery question: 'If I could give your best rep's instincts to every rep on your team, what would that be worth to your business?' This quantifies the value of knowledge transfer, which is Dexora's core promise."
+    },
+    {
+      "id": "gk-013",
+      "category": "competitor",
+      "content": "vs Gong: Gong is post-call analysis — it tells you what happened after the fact. Dexora helps during the call in real time. They're complementary but Dexora directly impacts the outcome while Gong only informs the next call."
+    },
+    {
+      "id": "gk-014",
+      "category": "competitor",
+      "content": "vs Chorus/Clari: These are call recording and analytics tools primarily for managers. Dexora is a rep-facing co-pilot. The value flows directly to the person on the call, not just to the sales manager reviewing recordings."
+    },
+    {
+      "id": "gk-015",
+      "category": "feature",
+      "content": "Dexora integration capabilities: Salesforce, HubSpot, Pipedrive CRM sync. Slack alerts for key moments. Zapier/webhook support for custom workflows. REST API for enterprise integrations. Calendar sync for pre-call briefing auto-population."
+    }
+  ]
+}
