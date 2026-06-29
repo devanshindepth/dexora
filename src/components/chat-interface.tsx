@@ -1,21 +1,22 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { Mic, MicOff, Phone, PhoneOff, Terminal } from "lucide-react";
+import { Mic, MicOff, Phone, PhoneOff, Terminal, Brain } from "lucide-react";
 import { Meter } from "./meter";
+import { MemoryPanel } from "./memory-panel";
+import type { CustomerMemory } from "@/lib/memory/types";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface LogEntry {
   id: string;
   time: string;
-  type: "user" | "dave" | "eval" | "system";
+  type: "user" | "dave" | "eval" | "system" | "memory";
   text: string;
 }
 
 type CallState = "idle" | "connecting" | "connected" | "ended";
 
 // ── PCM Audio Queue ───────────────────────────────────────────────────────────
-// Schedules raw pcm_f32le chunks through Web Audio API with gap-free playback
 class PCMAudioQueue {
   private ctx: AudioContext;
   private nextStartTime = 0;
@@ -59,6 +60,10 @@ export default function ChatInterface() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [outcomeMsg, setOutcomeMsg] = useState<string | null>(null);
+  const [activePanel, setActivePanel] = useState<"logs" | "memory">("logs");
+  const [memory, setMemory] = useState<CustomerMemory | null>(null);
+  const [isMemoryUpdating, setIsMemoryUpdating] = useState(false);
+  const [sessionCount, setSessionCount] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -66,13 +71,25 @@ export default function ChatInterface() {
   const streamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<AudioWorkletNode | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
-  const daveAudioSrcRef = useRef<AudioBufferSourceNode | null>(null);
   const daveSpeakingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Load memory on mount
+  useEffect(() => {
+    fetch("/api/memory")
+      .then((r) => r.json())
+      .then((m: CustomerMemory) => {
+        setMemory(m);
+        setSessionCount(m.episodic.length);
+      })
+      .catch(() => {});
+  }, []);
 
   // Auto-scroll logs
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs]);
+    if (activePanel === "logs") {
+      logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [logs, activePanel]);
 
   const addLog = useCallback(
     (type: LogEntry["type"], text: string) => {
@@ -113,12 +130,57 @@ export default function ChatInterface() {
     setCallState("ended");
   }, []);
 
+  // ── Reset memory ──────────────────────────────────────────────────────────
+  const resetMemory = useCallback(async () => {
+    if (!confirm("Reset all memory for Dave Miller? This clears all session history and learned facts.")) return;
+    await fetch("/api/memory", { method: "DELETE" });
+    const fresh = await fetch("/api/memory").then((r) => r.json());
+    setMemory(fresh);
+    setSessionCount(0);
+    addLog("memory", "Memory reset — starting fresh with Dave.");
+  }, [addLog]);
+
+  // ── Poll memory after session ends ─────────────────────────────────────────
+  const pollMemoryUpdate = useCallback(() => {
+    setIsMemoryUpdating(true);
+    let attempts = 0;
+    const MAX = 12;
+    const interval = setInterval(async () => {
+      attempts++;
+      try {
+        const updated: CustomerMemory = await fetch("/api/memory").then((r) => r.json());
+        // Check if memory was updated (new session in episodic)
+        if (updated.episodic.length > sessionCount) {
+          setMemory(updated);
+          setSessionCount(updated.episodic.length);
+          setIsMemoryUpdating(false);
+          clearInterval(interval);
+          addLog("memory", `Memory updated — ${updated.episodic.length} sessions, ${updated.reflections.length} lessons learned.`);
+          if (updated.reflections.length > 0) {
+            const latest = updated.reflections[updated.reflections.length - 1];
+            addLog("memory", `Lesson: "${latest.lesson}"`);
+          }
+        }
+      } catch {
+        // ignore
+      }
+      if (attempts >= MAX) {
+        setIsMemoryUpdating(false);
+        clearInterval(interval);
+      }
+    }, 3000);
+  }, [sessionCount, addLog]);
+
   // ── Start call ─────────────────────────────────────────────────────────────
   const startCall = useCallback(async () => {
     setErrorMsg(null);
     setCallState("connecting");
     setLogs([]);
-    addLog("system", "Dialing Dave Miller...");
+
+    const returning = sessionCount > 0;
+    addLog("system", returning
+      ? `Calling Dave Miller... (${sessionCount} previous session${sessionCount > 1 ? "s" : ""} in memory)`
+      : "Dialing Dave Miller...");
 
     // 1. Mic permission
     let stream: MediaStream;
@@ -171,16 +233,13 @@ export default function ChatInterface() {
     ws.onerror = (err) => {
       console.error("[WS] Error", err);
       setErrorMsg(
-        `Cannot connect to voice server (${wsUrl}). Make sure to run: bun run server.ts`
+        `Cannot connect to voice server (${wsUrl}). Make sure to run: bun run start:ws`
       );
       hangUp();
     };
 
     ws.onclose = () => {
       console.log("[WS] Closed");
-      if (callState === "connected") {
-        addLog("system", "Call disconnected.");
-      }
     };
 
     ws.onmessage = async (event) => {
@@ -190,7 +249,7 @@ export default function ChatInterface() {
         const f32 = new Float32Array(event.data);
         if (audioQueueRef.current) {
           setIsDaveSpeaking(true);
-          daveAudioSrcRef.current = audioQueueRef.current.enqueue(f32);
+          audioQueueRef.current.enqueue(f32);
         }
         return;
       }
@@ -199,24 +258,25 @@ export default function ChatInterface() {
       try {
         const msg = JSON.parse(event.data as string);
 
-        if (msg.type === "ready") {
-          // Server signals Dave has finished greeting — auto-unmute mic
+        if (msg.type === "memory_snapshot") {
+          // Server sends memory on connect so UI is immediately in sync
+          setMemory(msg.memory as CustomerMemory);
+          setSessionCount((msg.memory as CustomerMemory).episodic.length);
+        } else if (msg.type === "ready") {
           setIsListening(true);
           streamRef.current?.getAudioTracks().forEach((t) => { t.enabled = true; });
-          addLog("system", "Mic is live - Dave is listening. Speak now.");
+          addLog("system", "Mic is live — Dave is listening. Speak now.");
         } else if (msg.type === "transcript") {
           addLog("user", msg.text);
         } else if (msg.type === "assistant") {
           addLog("dave", msg.text);
         } else if (msg.type === "dave_done") {
-          // Dave finished speaking — schedule setIsDaveSpeaking(false) after audio drains
           if (audioQueueRef.current && audioCtxRef.current) {
             const delay =
               Math.max(0, audioQueueRef.current.scheduledUntil - audioCtxRef.current.currentTime) * 1000 + 200;
             if (daveSpeakingTimerRef.current) clearTimeout(daveSpeakingTimerRef.current);
             daveSpeakingTimerRef.current = setTimeout(() => {
               setIsDaveSpeaking(false);
-              // Re-enable mic after Dave stops speaking
               setIsListening(true);
               streamRef.current?.getAudioTracks().forEach((t) => { t.enabled = true; });
             }, delay);
@@ -239,7 +299,11 @@ export default function ChatInterface() {
           } else {
             setOutcomeMsg("❌ FAILURE — Dave hung up the phone.");
           }
+          addLog("memory", "Memory agent is updating customer profile...");
           hangUp();
+          pollMemoryUpdate();
+          // Switch to memory panel to show what was learned
+          setTimeout(() => setActivePanel("memory"), 1500);
         }
       } catch (e) {
         console.error("[WS message parse error]", e);
@@ -251,40 +315,27 @@ export default function ChatInterface() {
     const processor = new AudioWorkletNode(audioCtx, "audio-processor");
     processorRef.current = processor;
     source.connect(processor);
-    // Don't connect to destination — we don't want mic echo
 
-    // Start with mic track DISABLED — will be enabled after Dave's greeting via "ready" message
     stream.getAudioTracks().forEach((t) => { t.enabled = false; });
 
     processor.port.onmessage = (e) => {
-      // Always forward audio to server; server discards it while Dave speaks
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(e.data);
       }
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [addLog, hangUp]);
+  }, [addLog, hangUp, sessionCount, pollMemoryUpdate]);
 
-  // ── Toggle mic (push-to-talk within a call) ────────────────────────────────
+  // ── Toggle mic ─────────────────────────────────────────────────────────────
   const toggleMic = useCallback(() => {
     if (callState !== "connected") return;
     setIsListening((prev) => {
       const next = !prev;
-      if (!next) {
-        // Mute: stop sending audio to server by pausing the track
-        streamRef.current?.getAudioTracks().forEach((t) => {
-          t.enabled = false;
-        });
-      } else {
-        streamRef.current?.getAudioTracks().forEach((t) => {
-          t.enabled = true;
-        });
-      }
+      streamRef.current?.getAudioTracks().forEach((t) => { t.enabled = next; });
       return next;
     });
   }, [callState]);
 
-  // ── Derived UI values ──────────────────────────────────────────────────────
   const isSimulationEnded = callState === "ended";
 
   const daveStatusText = isDaveSpeaking
@@ -299,12 +350,19 @@ export default function ChatInterface() {
 
   return (
     <div className="flex w-full h-screen bg-[var(--background)] text-[var(--foreground)] font-sans text-sm selection:bg-[var(--accent)] selection:text-white">
-      {/* ── Left Panel: Call Interface ─────────────────────────────────────── */}
+      {/* ── Left Panel: Call Interface ──────────────────────────────────────── */}
       <div className="flex flex-col w-2/3 border-r border-[var(--border-dark)] bg-[var(--panel-bg)]">
         {/* Header */}
         <div className="flex items-center justify-between h-12 px-4 border-b border-[var(--border-color)] bg-[var(--surface-bg)] shadow-sm z-10">
-          <div className="text-xs font-semibold tracking-wide uppercase text-[var(--foreground-muted)]">
-            Sales Simulator — Dave Miller (IT Director, FreightCore)
+          <div className="flex items-center gap-3">
+            <div className="text-xs font-semibold tracking-wide uppercase text-[var(--foreground-muted)]">
+              Dexora — Dave Miller (IT Director, FreightCore)
+            </div>
+            {sessionCount > 0 && (
+              <span className="text-[9px] font-mono bg-[#1a2030] text-[#569cd6] border border-[#569cd6] px-2 py-0.5 rounded">
+                {sessionCount} session{sessionCount > 1 ? "s" : ""} in memory
+              </span>
+            )}
           </div>
           {callState === "connected" && (
             <div className="flex items-center gap-2 text-[10px] font-mono text-[var(--success)]">
@@ -333,6 +391,11 @@ export default function ChatInterface() {
               }`}
             >
               {outcomeMsg}
+              {isMemoryUpdating && (
+                <div className="mt-3 text-[10px] text-[var(--warning)] animate-pulse">
+                  ● Memory agent is processing this session...
+                </div>
+              )}
               <div className="mt-4">
                 <button
                   onClick={() => {
@@ -378,7 +441,6 @@ export default function ChatInterface() {
               {/* Call controls */}
               <div className="flex items-center gap-8">
                 {callState === "idle" || callState === "ended" ? (
-                  /* Start call button */
                   <div className="flex flex-col items-center gap-3">
                     <button
                       onClick={startCall}
@@ -388,11 +450,10 @@ export default function ChatInterface() {
                       <Phone size={30} />
                     </button>
                     <span className="text-[10px] font-mono text-[#555] uppercase tracking-widest">
-                      Call Dave
+                      {sessionCount > 0 ? "Call Again" : "Call Dave"}
                     </span>
                   </div>
                 ) : callState === "connecting" ? (
-                  /* Connecting state */
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-20 h-20 rounded-full flex items-center justify-center border border-[#333] text-[#555] animate-pulse">
                       <Phone size={30} />
@@ -402,9 +463,7 @@ export default function ChatInterface() {
                     </span>
                   </div>
                 ) : (
-                  /* Connected controls */
                   <>
-                    {/* Mic toggle */}
                     <div className="flex flex-col items-center gap-3">
                       <button
                         id="mic-toggle-btn"
@@ -423,7 +482,6 @@ export default function ChatInterface() {
                       </span>
                     </div>
 
-                    {/* Hang up */}
                     <div className="flex flex-col items-center gap-3">
                       <button
                         id="hang-up-btn"
@@ -440,7 +498,6 @@ export default function ChatInterface() {
                 )}
               </div>
 
-              {/* Hint */}
               {callState === "connected" && !isDaveSpeaking && (
                 <div className="mt-8 text-[10px] font-mono text-[#444] text-center">
                   {isListening
@@ -453,86 +510,126 @@ export default function ChatInterface() {
         </div>
       </div>
 
-      {/* ── Right Panel: Metrics & Logs ────────────────────────────────────── */}
+      {/* ── Right Panel: Metrics / Memory ──────────────────────────────────── */}
       <div className="flex flex-col w-1/3 bg-[var(--surface-bg)]">
-        {/* Header */}
-        <div className="flex items-center gap-2 h-12 px-4 border-b border-[var(--border-dark)] bg-[var(--panel-bg)] text-xs font-semibold tracking-wide uppercase text-[var(--foreground-muted)] shadow-sm">
-          <Terminal size={14} />
-          Evaluator Metrics
+        {/* Tab headers */}
+        <div className="flex h-12 border-b border-[var(--border-dark)] bg-[var(--panel-bg)] shadow-sm">
+          <button
+            onClick={() => setActivePanel("logs")}
+            className={`flex-1 flex items-center justify-center gap-2 text-[10px] font-mono font-semibold uppercase tracking-wider transition-colors ${
+              activePanel === "logs"
+                ? "text-white border-b-2 border-[var(--accent-hover)]"
+                : "text-[var(--foreground-muted)] hover:text-white"
+            }`}
+          >
+            <Terminal size={11} />
+            Evaluator
+          </button>
+          <button
+            onClick={() => setActivePanel("memory")}
+            className={`flex-1 flex items-center justify-center gap-2 text-[10px] font-mono font-semibold uppercase tracking-wider transition-colors ${
+              activePanel === "memory"
+                ? "text-white border-b-2 border-[var(--accent-hover)]"
+                : "text-[var(--foreground-muted)] hover:text-white"
+            }`}
+          >
+            <Brain size={11} />
+            Memory
+            {isMemoryUpdating && <span className="text-[var(--warning)] text-[8px] animate-pulse">●</span>}
+          </button>
         </div>
 
-        {/* Meters */}
-        <div className="p-6 border-b border-[var(--border-dark)] bg-[var(--panel-bg)]">
-          <Meter
-            label="Trust Level"
-            value={trust}
-            colorClass={
-              trust > 60
-                ? "bg-[var(--success)]"
-                : trust < 40
-                ? "bg-[var(--danger)]"
-                : "bg-[var(--accent)]"
-            }
-          />
-          <Meter
-            label="Perceived Value"
-            value={value}
-            colorClass={
-              value > 60
-                ? "bg-[var(--success)]"
-                : value < 40
-                ? "bg-[var(--danger)]"
-                : "bg-[var(--warning)]"
-            }
-          />
+        {/* Evaluator tab */}
+        {activePanel === "logs" && (
+          <div className="flex flex-col flex-1 overflow-hidden">
+            {/* Meters */}
+            <div className="p-6 border-b border-[var(--border-dark)] bg-[var(--panel-bg)]">
+              <Meter
+                label="Trust Level"
+                value={trust}
+                colorClass={
+                  trust > 60
+                    ? "bg-[var(--success)]"
+                    : trust < 40
+                    ? "bg-[var(--danger)]"
+                    : "bg-[var(--accent)]"
+                }
+              />
+              <Meter
+                label="Perceived Value"
+                value={value}
+                colorClass={
+                  value > 60
+                    ? "bg-[var(--success)]"
+                    : value < 40
+                    ? "bg-[var(--danger)]"
+                    : "bg-[var(--warning)]"
+                }
+              />
+              <div className="mt-4 flex gap-2 justify-between text-[10px] font-mono text-[var(--foreground-muted)]">
+                <span>WIN: T≥70, V≥70</span>
+                <span>LOSS: T≤0 OR V≤0</span>
+              </div>
+            </div>
 
-          <div className="mt-4 flex gap-2 justify-between text-[10px] font-mono text-[var(--foreground-muted)]">
-            <span>WIN: T≥70, V≥70</span>
-            <span>LOSS: T≤0 OR V≤0</span>
+            {/* Call log */}
+            <div className="flex-1 overflow-hidden flex flex-col">
+              <div className="px-4 py-2 text-[10px] font-mono text-[var(--foreground-muted)] border-b border-[var(--border-color)]">
+                CALL LOG
+              </div>
+              <div className="flex-1 overflow-y-auto p-4 space-y-2 font-mono text-[11px] bg-[#1e1e1e] border-t-8 border-[var(--border-dark)]">
+                {logs.length === 0 ? (
+                  <div className="text-[#555] italic">Waiting for call to start...</div>
+                ) : (
+                  logs.map((log) => (
+                    <div
+                      key={log.id}
+                      className="flex gap-3 leading-tight border-b border-[#2a2a2a] pb-2 last:border-0"
+                    >
+                      <span className="text-[#555] shrink-0">[{log.time}]</span>
+                      <span
+                        className={
+                          log.type === "dave"
+                            ? "text-[var(--accent-hover)]"
+                            : log.type === "user"
+                            ? "text-[#e5e5e5]"
+                            : log.type === "eval"
+                            ? "text-[var(--warning)]"
+                            : log.type === "memory"
+                            ? "text-[#569cd6]"
+                            : "text-[#555]"
+                        }
+                      >
+                        {log.type === "dave"
+                          ? "[Dave] "
+                          : log.type === "user"
+                          ? "[You] "
+                          : log.type === "eval"
+                          ? "[Eval] "
+                          : log.type === "memory"
+                          ? "[Memory] "
+                          : ""}
+                        {log.text}
+                      </span>
+                    </div>
+                  ))
+                )}
+                <div ref={logsEndRef} />
+              </div>
+            </div>
           </div>
-        </div>
+        )}
 
-        {/* Conversation Log */}
-        <div className="flex-1 overflow-hidden flex flex-col">
-          <div className="px-4 py-2 text-[10px] font-mono text-[var(--foreground-muted)] border-b border-[var(--border-color)]">
-            CALL LOG
+        {/* Memory tab */}
+        {activePanel === "memory" && (
+          <div className="flex-1 overflow-hidden">
+            <MemoryPanel
+              memory={memory}
+              isUpdating={isMemoryUpdating}
+              onReset={resetMemory}
+            />
           </div>
-          <div className="flex-1 overflow-y-auto p-4 space-y-2 font-mono text-[11px] bg-[#1e1e1e] border-t-8 border-[var(--border-dark)]">
-            {logs.length === 0 ? (
-              <div className="text-[#555] italic">Waiting for call to start...</div>
-            ) : (
-              logs.map((log) => (
-                <div
-                  key={log.id}
-                  className="flex gap-3 leading-tight border-b border-[#2a2a2a] pb-2 last:border-0"
-                >
-                  <span className="text-[#555] shrink-0">[{log.time}]</span>
-                  <span
-                    className={
-                      log.type === "dave"
-                        ? "text-[var(--accent)]"
-                        : log.type === "user"
-                        ? "text-[#e5e5e5]"
-                        : log.type === "eval"
-                        ? "text-[var(--warning)]"
-                        : "text-[#555]"
-                    }
-                  >
-                    {log.type === "dave"
-                      ? "[Dave] "
-                      : log.type === "user"
-                      ? "[You] "
-                      : log.type === "eval"
-                      ? "[Eval] "
-                      : ""}
-                    {log.text}
-                  </span>
-                </div>
-              ))
-            )}
-            <div ref={logsEndRef} />
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );

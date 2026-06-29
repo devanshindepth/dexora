@@ -8,7 +8,8 @@ export async function POST(req: Request) {
   const { messages } = await req.json();
 
   const result = await generateObject({
-    model: google("gemini-2.5-flash-lite"),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    model: google("gemini-2.5-flash-lite") as any,
     system: `
 You are an expert sales coach and evaluator.
 Analyze the latest message from the user (the sales rep) in the context of the conversation with Dave Miller (IT Director, skeptical, hard persona).

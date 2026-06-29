@@ -1,58 +1,22 @@
 import { serve } from "bun";
 import { generateText } from "ai";
 import { google } from "@ai-sdk/google";
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { createGroq } from "@ai-sdk/groq";
 import Cartesia from "@cartesia/cartesia-js";
 import "dotenv/config";
+
+// Memory system
+import { getCustomerMemory, saveCustomerMemory, resetCustomerMemory } from "./src/lib/memory/store";
+import { runMemoryAgent } from "./src/agents/memory-agent";
+import { buildDaveSystemPrompt, buildEvaluatorPrompt } from "./src/agents/conversation-agent";
 
 // -- Config -------------------------------------------------------------------
 const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY!.trim();
 const VOICE_ID = "a0e99841-438c-4a64-b679-ae501e7d6091";
+const CUSTOMER_ID = "dave-miller-freightcore"; // Single demo prospect
 
 const cartesia = new Cartesia({ apiKey: CARTESIA_API_KEY });
-const groq = createOpenAICompatible({
-  name: "groq",
-  baseURL: "https://api.groq.com/openai/v1",
-  apiKey: process.env.GROQ_API_KEY,
-});
-
-// -- Persona ------------------------------------------------------------------
-const DAVE_BASE_PROMPT = `
-You are Dave Miller, IT Director at a 500-person logistics company called FreightCore.
-A sales rep has just called you cold. You picked up.
-
-PERSONALITY:
-- Extremely busy, deeply skeptical of sales reps
-- Recently burned by a vendor whose system crashed and cost the company $80k
-- Blunt, sometimes sarcastic, quick to end calls if annoyed
-- You speak like a real person — short sentences, contractions, occasional pauses like "Look..." or "Right, but..."
-- NEVER say "Certainly!", "Great!", "Absolutely!" — those are sales words, not yours
-- If the sales rep is wasting your time, failing to make a point, or saying something wrong, you get extremely frustrated.
-
-RULES:
-- Keep ALL responses to 1-3 sentences. This is a phone call, not an essay.
-- If trust < 25 or value < 25: You get extremely frustrated and abruptly cut the call off using strong, natural frustrated language (e.g. "What the hell is this?", "Fuck you", "I don't have time for this bullshit", or "Lose my number.")
-- If trust 25-59: skeptical but listening if they're not wasting your time
-- If trust >= 60 AND value >= 60: starting to warm up, willing to discuss next steps
-- Never break character. Never say you are an AI.
-`;
-
-const EVALUATOR_PROMPT = `
-You are an expert sales coach AI evaluating a cold sales call in real-time.
-Given the conversation so far, evaluate ONLY the last message from the sales rep (user role).
-
-Respond with ONLY a valid JSON object — no markdown, no explanation, just JSON:
-{
-  "trustDelta": <integer from -15 to +15>,
-  "valueDelta": <integer from -15 to +15>,
-  "reasoning": "<one short sentence>"
-}
-
-trustDelta: how much does this message increase/decrease Dave's trust in the rep?
-valueDelta: how much does this message increase/decrease Dave's perceived value of what's being sold?
-
-Be strict and realistic. Generic openers hurt trust. Specific relevant insight helps. Cold pitches hurt value.
-`;
+const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
 
 // -- Types --------------------------------------------------------------------
 interface ConversationMessage {
@@ -69,6 +33,8 @@ interface WsData {
   value: number;
   isDaveSpeaking: boolean;
   isProcessing: boolean;
+  sessionId: string;
+  memoryUpdateTriggered: boolean;
 }
 
 // -- TTS: speak as Dave -------------------------------------------------------
@@ -113,9 +79,8 @@ async function evaluate(
       conversation.map((m) => `${m.role === "user" ? "Sales Rep" : "Dave"}: ${m.content}`).join("\n");
 
     const { text } = await generateText({
-      // model: google("gemini-2.5-flash-lite"),
       model: groq("llama-3.1-8b-instant"),
-      system: EVALUATOR_PROMPT,
+      system: buildEvaluatorPrompt(),
       prompt,
     });
 
@@ -132,17 +97,48 @@ async function evaluate(
   }
 }
 
-// -- Dave respond -------------------------------------------------------------
+// -- Memory update (async, fires after session ends) --------------------------
+async function triggerMemoryUpdate(data: WsData, outcome: "success" | "failure"): Promise<void> {
+  if (data.memoryUpdateTriggered) return;
+  data.memoryUpdateTriggered = true;
+
+  console.log(`[MemoryAgent] Updating memory for session ${data.sessionId} (${outcome})...`);
+  try {
+    const currentMemory = getCustomerMemory(CUSTOMER_ID);
+    const { updatedMemory, result } = await runMemoryAgent(
+      {
+        customerId: CUSTOMER_ID,
+        sessionId: data.sessionId,
+        transcript: data.conversation,
+        finalTrust: data.trust,
+        finalValue: data.value,
+        outcome,
+      },
+      currentMemory
+    );
+
+    saveCustomerMemory(updatedMemory);
+    console.log(`[MemoryAgent] Memory updated. New facts: ${result.newFacts.length}, Reflections: ${result.reflections.length}`);
+    if (result.newFacts.length) console.log(`[MemoryAgent] Facts: ${result.newFacts.join("; ")}`);
+    if (result.reflections.length) console.log(`[MemoryAgent] Reflections: ${result.reflections.join("; ")}`);
+  } catch (err) {
+    console.error("[MemoryAgent] Error:", err);
+  }
+}
+
+// -- Dave respond (memory-aware) ----------------------------------------------
 async function daveRespond(ws: any, data: WsData): Promise<void> {
   if (data.isDaveSpeaking || data.isProcessing) return;
   data.isProcessing = true;
 
   try {
-    const stateNote = `\nCURRENT STATE: Trust=${data.trust}/100, Value=${data.value}/100\n`;
+    // Load current memory and build context-aware prompt
+    const memory = getCustomerMemory(CUSTOMER_ID);
+    const systemPrompt = buildDaveSystemPrompt(memory, data.trust, data.value);
+
     const { text } = await generateText({
-      // model: google("gemini-2.5-flash-lite"),
       model: groq("llama-3.1-8b-instant"),
-      system: DAVE_BASE_PROMPT + stateNote,
+      system: systemPrompt,
       messages: data.conversation,
     });
 
@@ -195,10 +191,17 @@ async function handleTranscript(userText: string, clientWs: any, data: WsData) {
 
     if (data.trust >= 70 && data.value >= 70) {
       console.log("[Game] Simulation ended - SUCCESS");
-      if (clientWs.readyState === 1) clientWs.send(JSON.stringify({ type: "simulation_end", outcome: "success" }));
+      if (clientWs.readyState === 1) {
+        clientWs.send(JSON.stringify({ type: "simulation_end", outcome: "success" }));
+      }
+      // Fire memory agent asynchronously — don't block
+      triggerMemoryUpdate(data, "success").catch(console.error);
     } else if (data.trust <= 0 || data.value <= 0) {
       console.log("[Game] Simulation ended - FAILURE");
-      if (clientWs.readyState === 1) clientWs.send(JSON.stringify({ type: "simulation_end", outcome: "failure" }));
+      if (clientWs.readyState === 1) {
+        clientWs.send(JSON.stringify({ type: "simulation_end", outcome: "failure" }));
+      }
+      triggerMemoryUpdate(data, "failure").catch(console.error);
     }
   });
 
@@ -223,7 +226,6 @@ function connectCartesiaSTT(clientWs: any, data: WsData): void {
       console.log("[Cartesia STT] Connected");
       data.sttReady = true;
 
-      // Flush any audio that arrived before STT was ready
       if (data.audioBuffer.length > 0) {
         console.log(`[Cartesia STT] Flushing ${data.audioBuffer.length} buffered chunks`);
         for (const chunk of data.audioBuffer) {
@@ -234,7 +236,6 @@ function connectCartesiaSTT(clientWs: any, data: WsData): void {
     });
 
     sttWs.on("turn.start", () => {
-      // User started speaking
       console.log("[Cartesia STT] Turn started");
     });
 
@@ -270,9 +271,6 @@ function sendAudioToSTT(data: WsData, chunk: Buffer): void {
     if (data.audioBuffer.length < 500) {
       data.audioBuffer.push(chunk);
     }
-    if (data.audioBuffer.length % 100 === 0 && data.audioBuffer.length > 0) {
-      console.log(`[Server] Buffering audio - STT not ready (${data.audioBuffer.length} chunks)`);
-    }
     return;
   }
 
@@ -294,6 +292,29 @@ serve({
       });
     }
 
+    // REST endpoint: get current memory (for the UI memory panel)
+    const url = new URL(req.url);
+    if (url.pathname === "/memory" && req.method === "GET") {
+      const memory = getCustomerMemory(CUSTOMER_ID);
+      return new Response(JSON.stringify(memory), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
+    // REST endpoint: reset memory (for demo resets)
+    if (url.pathname === "/memory/reset" && req.method === "POST") {
+      resetCustomerMemory(CUSTOMER_ID);
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
     const upgraded = server.upgrade(req, {
       headers: { "Access-Control-Allow-Origin": "*" },
       data: {
@@ -305,11 +326,13 @@ serve({
         value: 50,
         isDaveSpeaking: false,
         isProcessing: false,
+        sessionId: `session-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        memoryUpdateTriggered: false,
       } satisfies WsData,
     });
 
     if (upgraded) return;
-    return new Response("Sales Simulator Voice Server — connect via WebSocket");
+    return new Response("Dexora Sales Simulator — connect via WebSocket");
   },
 
   websocket: {
@@ -317,14 +340,28 @@ serve({
       console.log("[WS] Client connected");
       const data = ws.data as WsData;
 
+      // Load memory to log context
+      const memory = getCustomerMemory(CUSTOMER_ID);
+      const sessions = memory.episodic.length;
+      console.log(
+        `[Memory] Customer has ${sessions} previous session(s). Buying stage: ${memory.semantic.buyingStage}. Predictions: close=${memory.predictions.closeProbability}%`
+      );
+
+      // Send memory snapshot to client for the memory panel
+      ws.send(JSON.stringify({ type: "memory_snapshot", memory }));
+
       // Start Cartesia STT connection
       connectCartesiaSTT(ws, data);
 
-      // Dave greets
+      // Dave greets — context-aware if returning customer
       setTimeout(async () => {
         if (ws.readyState !== 1) return;
 
-        const greeting = "Yeah? Dave Miller.";
+        const greeting =
+          sessions > 0
+            ? `Yeah? Dave Miller. ...Oh, it's you again.`
+            : "Yeah? Dave Miller.";
+
         data.conversation.push({ role: "assistant", content: greeting });
         data.isDaveSpeaking = true;
 
@@ -367,6 +404,13 @@ serve({
     close(ws) {
       console.log("[WS] Client disconnected");
       const data = ws.data as WsData;
+
+      // If session ended without a win/loss, still save memory (in_progress)
+      if (!data.memoryUpdateTriggered && data.conversation.length > 2) {
+        console.log("[Memory] Session ended mid-call — saving in-progress memory");
+        triggerMemoryUpdate(data, "in_progress" as any).catch(console.error);
+      }
+
       if (data.sttSocket) {
         try {
           data.sttSocket.close();
@@ -376,4 +420,5 @@ serve({
   },
 });
 
-console.log("Sales Simulator server running on ws://localhost:8080");
+console.log("Dexora Sales Simulator server running on ws://localhost:8080");
+console.log("Memory REST API available at http://localhost:8080/memory");

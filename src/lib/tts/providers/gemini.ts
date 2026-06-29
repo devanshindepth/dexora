@@ -45,15 +45,14 @@ export class GeminiTTSProvider implements TTSProvider {
     }
 
     const base64Data = audioPart.inlineData.data;
+    const mimeType = audioPart.inlineData.mimeType;
     const binaryStr = atob(base64Data);
     const bytes = new Uint8Array(binaryStr.length);
     for (let i = 0; i < binaryStr.length; i++) {
       bytes[i] = binaryStr.charCodeAt(i);
     }
 
-    // Wrap PCM in WAV if it's raw PCM, otherwise just return it
-    const mimeType = audioPart.inlineData.mimeType;
-    let finalBuffer = bytes;
+    let finalBuffer: Uint8Array = bytes;
     
     if (mimeType.includes("pcm")) {
       // Create WAV header for 16-bit 24kHz mono PCM
