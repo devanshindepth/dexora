@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+:root {
+  --background: #1e1e1e;
+  --panel-bg: #252526;
+  --surface-bg: #2d2d30;
+  --border-color: #3e3e42;
+  --border-dark: #111111;
+  --foreground: #cccccc;
+  --foreground-muted: #858585;
+  --accent: #094771;
+  --accent-hover: #1177bb;
+  --danger: #f14c4c;
+  --success: #89d185;
+  --warning: #cca700;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-panel: var(--panel-bg);
+  --color-surface: var(--surface-bg);
+  --color-border: var(--border-color);
+  --color-border-dark: var(--border-dark);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--foreground-muted);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-danger: var(--danger);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+  margin: 0;
+  padding: 0;
+  height: 100vh;
+  overflow: hidden; /* App-like unscrollable body */
+  display: flex;
+  flex-direction: column;
+}
+
+/* Custom scrollbar for Unity editor feel */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: var(--background);
+  border-left: 1px solid var(--border-color);
+}
+::-webkit-scrollbar-thumb {
+  background: #424242;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4f4f4f;
+}
+::-webkit-scrollbar-corner {
+  background: var(--background);
+}
